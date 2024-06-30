@@ -5,8 +5,6 @@ import (
 	"reflect"
 )
 
-
-
 type Result[T any] struct {
 	Values []T
 	Err   error
@@ -27,7 +25,21 @@ func (r *Result[T]) IsErr() (bool) {
 	return r.Err != nil
 }
 
-func HandleArgs(args ...interface{}) ([]reflect.Value) {
+type EasyHandler interface {
+	HandleArgs(args ...interface{}) ([]reflect.Value)
+	Wrap(function interface{}, args ...interface{}) (func() Result[any])
+	wrapErrHandler(handlerfunc interface{}, args ...interface{}) (Result[FuncValues])
+	Try(handler interface{}, fns ...func() Result[any]) ([]any, Result[any])
+}
+
+type EasyhandlerImpl struct {}
+
+type FuncValues struct {
+	Args []reflect.Value
+	Func *reflect.Value
+}
+
+func (esi *EasyhandlerImpl) HandleArgs(args ...interface{}) ([]reflect.Value) {
 	inputs := make([]reflect.Value, len(args))
 	for i, arg := range args {
 		inputs[i] = reflect.ValueOf(arg)
@@ -35,7 +47,7 @@ func HandleArgs(args ...interface{}) ([]reflect.Value) {
 	return inputs
 }
 
-func Wrap(function interface{}, args ...interface{}) (func() Result[any]) {
+func (esi *EasyhandlerImpl) Wrap(function interface{}, args ...interface{}) (func() Result[any]) {
 	return func() Result[any] {
 		var funcValue = reflect.ValueOf(function)
 		var funcType = funcValue.Type()
@@ -45,7 +57,7 @@ func Wrap(function interface{}, args ...interface{}) (func() Result[any]) {
 		if len(args) != funcType.NumIn() {
 			return Err[any](fmt.Errorf("argument count does not match function's parameter count"))
 		}
-		inputs := HandleArgs(args...)
+		inputs := esi.HandleArgs(args...)
 		var results = funcValue.Call(inputs)
 		if funcType.NumOut() == 0 {
 			return Ok[any]()
@@ -66,15 +78,11 @@ func Wrap(function interface{}, args ...interface{}) (func() Result[any]) {
 	}
 }
 
-type FuncValues struct {
-	Args []reflect.Value
-	Func *reflect.Value
-}
 
-func wrapErrHandler(handlerfunc interface{}, args ...interface{}) (Result[FuncValues]) {
+func (esi *EasyhandlerImpl) wrapErrHandler(handlerfunc interface{}, args ...interface{}) (Result[FuncValues]) {
 	var handlerValue = reflect.ValueOf(handlerfunc) 
 	var handlerType = handlerValue.Type()
-	var in = HandleArgs(args...)
+	var in = esi.HandleArgs(args...)
 	if handlerType.Kind() != reflect.Func {
 		return Err[FuncValues](fmt.Errorf("provided handler is not a function"))
 	}
@@ -84,9 +92,9 @@ func wrapErrHandler(handlerfunc interface{}, args ...interface{}) (Result[FuncVa
 	return Result[FuncValues]{ Values: []FuncValues{ { Args: in, Func: &handlerValue, }, } ,}
 }
 
-func Try(handler interface{}, fns ...func() Result[any]) ([]any, Result[any]) {
+func (esi *EasyhandlerImpl) Try(handler interface{}, fns ...func() Result[any]) ([]any, Result[any]) {
 	var results = []any{}
-	var handlerfunc = wrapErrHandler(handler)
+	var handlerfunc = esi.wrapErrHandler(handler)
 	if len(fns) == 0 {
 		return nil, Err[any](fmt.Errorf("no functions provided"))
 	}
