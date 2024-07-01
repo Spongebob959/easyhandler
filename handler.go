@@ -39,7 +39,7 @@ type FunctionHandler interface {
 	ConvertArgs(args ...interface{}) []reflect.Value
 	WrapFunction(function interface{}, args ...interface{}) func() Result[any]
 	WrapErrorHandler(handlerFunc interface{}) Result[HandlerValues]
-	ExecuteWithHandler(handler interface{}, funcs ...func() Result[any]) ([]any, Result[any])
+	Try(handler interface{}, funcs ...func() Result[any]) ([]any, Result[any])
 	SetTimeout(duration time.Duration)
 	SetRetry(retries int)
 	SetParallel(isParallel bool)
@@ -89,12 +89,12 @@ func (fhi *FunctionHandlerImpl) WrapFunction(function interface{}, args ...inter
 		funcType := funcValue.Type()
 		if funcType.Kind() != reflect.Func {
 			err := fmt.Errorf("no function provided")
-			fhi.logError(err)
+			fhi.LogError(err)
 			return Err[any](err)
 		}
 		if len(args) != funcType.NumIn() {
 			err := fmt.Errorf("argument count does not match function's parameter count")
-			fhi.logError(err)
+			fhi.LogError(err)
 			return Err[any](err)
 		}
 		inputs := fhi.ConvertArgs(args...)
@@ -107,7 +107,7 @@ func (fhi *FunctionHandlerImpl) WrapFunction(function interface{}, args ...inter
 			errValue := results[lastIndex].Interface()
 			if errValue != nil {
 				err := errValue.(error)
-				fhi.logError(err)
+				fhi.LogError(err)
 				return Err[any](err)
 			}
 			results = results[:lastIndex]
@@ -126,34 +126,34 @@ func (fhi *FunctionHandlerImpl) WrapErrorHandler(handlerFunc interface{}) Result
 	handlerType := handlerValue.Type()
 	if handlerType.Kind() != reflect.Func {
 		err := fmt.Errorf("provided handler is not a function")
-		fhi.logError(err)
+		fhi.LogError(err)
 		return Err[HandlerValues](err)
 	}
 	if handlerType.NumIn() != 1 || handlerType.In(0) != reflect.TypeOf((*error)(nil)).Elem() {
 		err := fmt.Errorf("the error handler must take an error as an arg")
-		fhi.logError(err)
+		fhi.LogError(err)
 		return Err[HandlerValues](err)
 	}
 	if handlerType.NumOut() > 1 || (handlerType.NumOut() == 1 && !handlerType.Out(0).Implements(reflect.TypeOf((*error)(nil)).Elem())) {
 		err := fmt.Errorf("the error handler must return at most one error")
-		fhi.logError(err)
+		fhi.LogError(err)
 		return Err[HandlerValues](err)
 	}
 	return Ok(HandlerValues{Func: &handlerValue})
 }
 
-// ExecuteWithHandler method to handle multiple functions and an error handler with optional parallelism
-func (fhi *FunctionHandlerImpl) ExecuteWithHandler(handler interface{}, funcs ...func() Result[any]) ([]any, Result[any]) {
+// Try method to handle multiple functions and an error handler with optional parallelism
+func (fhi *FunctionHandlerImpl) Try(handler interface{}, funcs ...func() Result[any]) ([]any, Result[any]) {
 	results := []any{}
 	handlerFunc := fhi.WrapErrorHandler(handler)
 	if handlerFunc.IsErr() {
 		err := fmt.Errorf("invalid error handler")
-		fhi.logError(err)
+		fhi.LogError(err)
 		return nil, Err[any](err)
 	}
 	if len(funcs) == 0 {
 		err := fmt.Errorf("no functions provided")
-		fhi.logError(err)
+		fhi.LogError(err)
 		return nil, Err[any](err)
 	}
 	if fhi.isParallel {
@@ -175,7 +175,7 @@ func (fhi *FunctionHandlerImpl) ExecuteWithHandler(handler interface{}, funcs ..
 					case res = <-ch:
 					case <-ctx.Done():
 						err := fmt.Errorf("function timed out")
-						fhi.logError(err)
+						fhi.LogError(err)
 						res = Err[any](err)
 					}
 				} else {
@@ -184,16 +184,14 @@ func (fhi *FunctionHandlerImpl) ExecuteWithHandler(handler interface{}, funcs ..
 				resultCh <- res
 			}(fn)
 		}
-
 		wg.Wait()
 		close(resultCh)
-
 		for res := range resultCh {
 			if res.IsErr() {
 				handlerResults := handlerFunc.Values[0].Func.Call([]reflect.Value{reflect.ValueOf(res.Err)})
 				if len(handlerResults) == 1 {
 					if handlerError, ok := handlerResults[0].Interface().(error); ok && handlerError != nil {
-						fhi.logError(handlerError)
+						fhi.LogError(handlerError)
 						return nil, Err[any](handlerError)
 					}
 				}
@@ -215,7 +213,7 @@ func (fhi *FunctionHandlerImpl) ExecuteWithHandler(handler interface{}, funcs ..
 				case res = <-ch:
 				case <-ctx.Done():
 					err := fmt.Errorf("function timed out")
-					fhi.logError(err)
+					fhi.LogError(err)
 					res = Err[any](err)
 				}
 			} else {
@@ -225,7 +223,7 @@ func (fhi *FunctionHandlerImpl) ExecuteWithHandler(handler interface{}, funcs ..
 				handlerResults := handlerFunc.Values[0].Func.Call([]reflect.Value{reflect.ValueOf(res.Err)})
 				if len(handlerResults) == 1 {
 					if handlerError, ok := handlerResults[0].Interface().(error); ok && handlerError != nil {
-						fhi.logError(handlerError)
+						fhi.LogError(handlerError)
 						return nil, Err[any](handlerError)
 					}
 				}
@@ -234,7 +232,6 @@ func (fhi *FunctionHandlerImpl) ExecuteWithHandler(handler interface{}, funcs ..
 			}
 		}
 	}
-
 	return results, Ok[any](nil)
 }
 
@@ -246,16 +243,17 @@ func (fhi *FunctionHandlerImpl) retryFunction(fn func() Result[any]) Result[any]
 		if res.IsOk() {
 			return res
 		}
-		fhi.logError(res.Err)
+		fhi.LogError(res.Err)
 		time.Sleep(time.Second) // Backoff can be added here
 	}
 	return res
 }
 
-// logError logs the error with file and line number information, very useful for the errorhandler
-func (fhi *FunctionHandlerImpl) logError(err error) {
+// LogError logs the error with file and line number information, very useful for the errorhandler
+func (fhi *FunctionHandlerImpl) LogError(err error) {
 	if err != nil {
 		_, file, line, _ := runtime.Caller(2) // Adjusted to capture the correct call stack frame
 		log.Printf("[ERROR] %s:%d %v", file, line, err)
 	}
 }
+
